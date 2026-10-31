@@ -7,6 +7,7 @@
 <meta name="theme-color" content="#247a59">
 <title>Expiry Reminder</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
 <style>
 *{box-sizing:border-box}
 body{margin:0;padding:20px;font-family:Arial,sans-serif;background:#f4f7f2;color:#26372e}
@@ -18,17 +19,20 @@ input,select,button{width:100%;padding:12px;margin:6px 0;border:1px solid #d8e1d
 button{background:#247a59;color:white;border:0;font-weight:bold}
 button.secondary{background:#e8f1eb;color:#247a59}
 button.dangerButton{background:#fbeaea;color:#b33}
+button:disabled{opacity:.5}
 .item{border:1px solid #e2e9e3;padding:12px;border-radius:12px;margin-top:10px}
 .small{font-size:13px;color:#66756b}
 .danger{color:#b33}
 .hidden{display:none}
 #message{font-size:14px;white-space:pre-wrap}
 .photoGrid{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
-.photoBox{width:90px}
-.photoBox img{width:90px;height:90px;object-fit:cover;border-radius:10px}
+.photoBox{width:100px;overflow:hidden}
+.photoBox img{width:100px;height:100px;object-fit:cover;border-radius:10px}
 .photoBox button{font-size:11px;padding:7px;margin:3px 0}
+.photoInput{background:#f7faf7;padding:8px;border-radius:10px;margin:8px 0}
 </style>
 </head>
+
 <body>
 
 <header>
@@ -38,35 +42,43 @@ button.dangerButton{background:#fbeaea;color:#b33}
 
 <div class="card">
 <h3>Account</h3>
+
 <div id="signedOut">
 <input id="email" type="email" placeholder="Email address">
 <input id="password" type="password" placeholder="Password (at least 6 characters)">
 <button onclick="signUp()">Create account</button>
 <button class="secondary" onclick="signIn()">Log in</button>
 </div>
+
 <div id="signedIn" class="hidden">
 <p id="accountText"></p>
 <button class="secondary" onclick="signOut()">Log out</button>
 </div>
+
 <p id="message"></p>
 </div>
 
 <div class="card">
 <h3>Your items</h3>
 <div id="stats"></div>
+
 <input id="search" placeholder="Search products..." oninput="render()">
+
 <select id="filter" onchange="render()">
 <option value="All">All items</option>
 <option value="Personal">Personal</option>
 <option value="Family">Family</option>
 <option value="Consumed">Consumed</option>
 </select>
+
 <div id="items"></div>
 </div>
 
 <div class="card">
 <h3>Add a product</h3>
+
 <input id="name" placeholder="Product name">
+
 <select id="category">
 <option>Food</option>
 <option>Drinks</option>
@@ -75,17 +87,54 @@ button.dangerButton{background:#fbeaea;color:#b33}
 <option>Household</option>
 <option>Other</option>
 </select>
+
 <select id="scope">
 <option>Personal</option>
 <option>Family</option>
 </select>
+
 <label class="small">Expiry date</label>
 <input id="date" type="date">
+
 <input id="quantity" type="number" min="1" value="1" placeholder="Quantity">
-<label class="small">Product photos (you can select multiple)</label>
-<input id="photo" type="file" accept="image/*" multiple>
-<p class="small">Maximum 8 MB per photo. Photos for Personal products are uploaded to Supabase Cloud. Family products are still stored on this device for now and do not support cloud photos.</p>
+
+<h4>Product photos (up to 5)</h4>
+<p class="small">Choose one photo in each box. You can attach up to five photos to one product.</p>
+
+<div class="photoInput">
+<label class="small">Photo 1</label>
+<input class="photoFile" id="photo1" type="file" accept="image/*">
+</div>
+
+<div class="photoInput">
+<label class="small">Photo 2</label>
+<input class="photoFile" id="photo2" type="file" accept="image/*">
+</div>
+
+<div class="photoInput">
+<label class="small">Photo 3</label>
+<input class="photoFile" id="photo3" type="file" accept="image/*">
+</div>
+
+<div class="photoInput">
+<label class="small">Photo 4</label>
+<input class="photoFile" id="photo4" type="file" accept="image/*">
+</div>
+
+<div class="photoInput">
+<label class="small">Photo 5</label>
+<input class="photoFile" id="photo5" type="file" accept="image/*">
+</div>
+
+<div id="photoPreview" class="photoGrid"></div>
+
 <button id="addButton" onclick="addItem()">Add item</button>
+
+<p class="small">
+Personal product photos are uploaded to Supabase Cloud.
+Family products are stored on this device for now. Family cloud sharing is not yet available.
+Maximum 8 MB per photo.
+</p>
 </div>
 
 <script>
@@ -114,10 +163,6 @@ function saveLocal(){
   localStorage.setItem("expiryItems",JSON.stringify(localItems));
 }
 
-function saveLegacyPhotos(){
-  localStorage.setItem("expiryPhotoCache",JSON.stringify(localPhotos));
-}
-
 function daysLeft(date){
   const today=new Date();
   today.setHours(0,0,0,0);
@@ -127,12 +172,51 @@ function daysLeft(date){
 
 function escapeText(s){
   return String(s??"").replace(/[&<>"']/g,c=>({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    "&":"&amp;",
+    "<":"&lt;",
+    ">":"&gt;",
+    '"':"&quot;",
+    "'":"&#39;"
   }[c]));
 }
 
+function selectedFiles(){
+  return Array.from(document.querySelectorAll(".photoFile"))
+    .map(input=>input.files[0])
+    .filter(Boolean);
+}
+
+function previewPhotos(){
+  const files=selectedFiles();
+  const preview=document.getElementById("photoPreview");
+
+  preview.innerHTML="";
+
+  files.forEach(file=>{
+    const box=document.createElement("div");
+    box.className="photoBox";
+
+    const img=document.createElement("img");
+    img.alt="Selected photo";
+    img.src=URL.createObjectURL(file);
+
+    img.onload=()=>URL.revokeObjectURL(img.src);
+
+    const label=document.createElement("div");
+    label.className="small";
+    label.textContent=file.name;
+
+    box.appendChild(img);
+    box.appendChild(label);
+    preview.appendChild(box);
+  });
+}
+
+document.querySelectorAll(".photoFile").forEach(input=>{
+  input.addEventListener("change",previewPhotos);
+});
+
 function photoExtension(file){
-  const type=(file.type||"").toLowerCase();
   const map={
     "image/jpeg":"jpg",
     "image/png":"png",
@@ -141,7 +225,7 @@ function photoExtension(file){
     "image/heic":"heic",
     "image/heif":"heif"
   };
-  return map[type]||"jpg";
+  return map[file.type]||"jpg";
 }
 
 async function signUp(){
@@ -208,8 +292,10 @@ async function signOut(){
 
   currentUser=null;
   cloudItems=[];
+
   document.getElementById("signedOut").classList.remove("hidden");
   document.getElementById("signedIn").classList.add("hidden");
+
   message("Logged out.");
   render();
 }
@@ -221,7 +307,7 @@ async function handleUser(user){
   document.getElementById("signedIn").classList.remove("hidden");
   document.getElementById("accountText").textContent="Logged in as "+user.email;
 
-  message("Checking your saved products...");
+  message("Loading your cloud products...");
 
   await migrateLocalPersonalItems();
   await loadCloudItems();
@@ -267,6 +353,37 @@ async function migrateLocalPersonalItems(){
   message("Your existing personal products have been transferred.");
 }
 
+async function uploadPhoto(file,itemId){
+  if(!currentUser)throw new Error("Please log in first.");
+
+  if(!file.type.startsWith("image/")){
+    throw new Error("Please select image files only.");
+  }
+
+  if(file.size>MAX_PHOTO_SIZE){
+    throw new Error("Each photo must be 8 MB or smaller.");
+  }
+
+  const path=currentUser.id+"/"+itemId+"/"+crypto.randomUUID()+"."+photoExtension(file);
+
+  const {error}=await client.storage.from(BUCKET).upload(
+    path,
+    file,
+    {
+      contentType:file.type,
+      upsert:false
+    }
+  );
+
+  if(error)throw error;
+
+  return {
+    item_id:itemId,
+    user_id:currentUser.id,
+    storage_path:path
+  };
+}
+
 async function loadCloudItems(){
   if(!currentUser)return;
 
@@ -276,7 +393,7 @@ async function loadCloudItems(){
     .order("created_at",{ascending:false});
 
   if(error){
-    message("Could not load cloud items: "+error.message,true);
+    message("Could not load products: "+error.message,true);
     return;
   }
 
@@ -286,29 +403,30 @@ async function loadCloudItems(){
 
   if(ids.length){
     const result=await client.from("item_photos")
-      .select("id,item_id,user_id,storage_path,created_at")
+      .select("id,item_id,storage_path")
       .in("item_id",ids);
 
     if(result.error){
-      message("Could not load photo records: "+result.error.message,true);
-    }else{
-      photoRows=result.data||[];
+      message("Photo database error: "+result.error.message,true);
+      return;
     }
+
+    photoRows=result.data||[];
   }
 
   const photoMap={};
 
   for(const photo of photoRows){
-    if(!photoMap[photo.item_id])photoMap[photo.item_id]=[];
-
     const {data:signed,error:signedError}=await client.storage
       .from(BUCKET)
       .createSignedUrl(photo.storage_path,3600);
 
     if(signedError){
-      console.warn("Could not create photo URL:",signedError.message);
+      console.error("Photo URL error:",signedError.message);
       continue;
     }
+
+    if(!photoMap[photo.item_id])photoMap[photo.item_id]=[];
 
     photoMap[photo.item_id].push({
       id:photo.id,
@@ -330,78 +448,40 @@ async function loadCloudItems(){
   }));
 }
 
-async function uploadPhotoFile(file,itemId){
-  if(!currentUser)throw new Error("Please log in first.");
-
-  if(!file.type.startsWith("image/")){
-    throw new Error("One of the selected files is not an image.");
-  }
-
-  if(file.size>MAX_PHOTO_SIZE){
-    throw new Error("Each photo must be 8 MB or smaller.");
-  }
-
-  const extension=photoExtension(file);
-  const path=currentUser.id+"/"+itemId+"/"+crypto.randomUUID()+"."+extension;
-
-  const {error:uploadError}=await client.storage
-    .from(BUCKET)
-    .upload(path,file,{
-      contentType:file.type,
-      upsert:false
-    });
-
-  if(uploadError)throw uploadError;
-
-  return {
-    item_id:itemId,
-    user_id:currentUser.id,
-    storage_path:path
-  };
-}
-
 async function migrateLegacyPhotos(){
   if(!currentUser)return;
 
-  const oldPhotos=Object.entries(localPhotos);
-
-  if(!oldPhotos.length)return;
-
-  let migrated=0;
-
-  for(const [itemId,dataUrl] of oldPhotos){
+  for(const [itemId,dataUrl] of Object.entries(localPhotos)){
     const item=cloudItems.find(x=>x.id===itemId);
 
     if(!item||!dataUrl||!dataUrl.startsWith("data:image/"))continue;
-    if(item.photos&&item.photos.length)continue;
+    if(item.photos.length)continue;
 
-    let uploadedPath=null;
+    let path=null;
 
     try{
       const response=await fetch(dataUrl);
       const blob=await response.blob();
-      const file=new File([blob],"old-photo.jpg",{type:blob.type||"image/jpeg"});
+      const file=new File([blob],"old-photo.jpg",{
+        type:blob.type||"image/jpeg"
+      });
 
-      const row=await uploadPhotoFile(file,itemId);
-      uploadedPath=row.storage_path;
+      const row=await uploadPhoto(file,itemId);
+      path=row.storage_path;
 
       const {error}=await client.from("item_photos").insert(row);
 
       if(error){
-        await client.storage.from(BUCKET).remove([uploadedPath]);
+        await client.storage.from(BUCKET).remove([path]);
         throw error;
       }
 
       delete localPhotos[itemId];
-      migrated++;
-    }catch(error){
-      console.warn("Legacy photo migration failed:",error.message);
-    }
-  }
+      localStorage.setItem("expiryPhotoCache",JSON.stringify(localPhotos));
 
-  if(migrated){
-    saveLegacyPhotos();
-    message(migrated+" old photo(s) transferred to Supabase Cloud.");
+    }catch(error){
+      console.warn("Old photo migration failed:",error.message);
+    }
   }
 }
 
@@ -410,53 +490,43 @@ async function addItem(){
   const name=document.getElementById("name").value.trim();
   const date=document.getElementById("date").value;
   const scope=document.getElementById("scope").value;
-  const files=Array.from(document.getElementById("photo").files||[]);
+  const files=selectedFiles();
 
   if(!name||!date){
     alert("Please enter a product name and expiry date.");
     return;
   }
 
-  if(files.some(file=>!file.type.startsWith("image/"))){
+  if(files.some(f=>!f.type.startsWith("image/"))){
     alert("Please select image files only.");
     return;
   }
 
-  if(files.some(file=>file.size>MAX_PHOTO_SIZE)){
+  if(files.some(f=>f.size>MAX_PHOTO_SIZE)){
     alert("Each photo must be 8 MB or smaller.");
     return;
   }
 
-  if(files.length && (!currentUser||scope!=="Personal")){
-    alert("Cloud photo uploads are currently available only for logged-in Personal products. Please choose Personal and log in.");
+  if(files.length&&(!currentUser||scope!=="Personal")){
+    alert("Please log in and choose Personal to upload cloud photos.");
     return;
   }
-
-  const item={
-    id:Date.now(),
-    name,
-    category:document.getElementById("category").value,
-    scope,
-    date,
-    quantity:Number(document.getElementById("quantity").value)||1,
-    consumed:false
-  };
 
   button.disabled=true;
   button.textContent="Saving...";
 
   try{
     if(currentUser&&scope==="Personal"){
-      message("Saving product to Supabase...");
+      message("Saving product...");
 
       const {data,error}=await client.from("items").insert({
         created_by:currentUser.id,
         personal_owner_id:currentUser.id,
         family_id:null,
-        name:item.name,
-        category:item.category,
-        quantity:item.quantity,
-        expiry_date:item.date,
+        name:name,
+        category:document.getElementById("category").value,
+        quantity:Number(document.getElementById("quantity").value)||1,
+        expiry_date:date,
         photo_path:null,
         notes:null,
         status:"active"
@@ -465,19 +535,22 @@ async function addItem(){
       if(error)throw error;
 
       const uploadedPaths=[];
-      let photoRows=[];
+      const photoRows=[];
 
       try{
         for(const file of files){
-          const row=await uploadPhotoFile(file,data.id);
+          message("Uploading photo "+(uploadedPaths.length+1)+" of "+files.length+"...");
+
+          const row=await uploadPhoto(file,data.id);
           uploadedPaths.push(row.storage_path);
           photoRows.push(row);
         }
 
         if(photoRows.length){
-          const {error:photoError}=await client.from("item_photos").insert(photoRows);
-          if(photoError)throw photoError;
+          const {error:insertError}=await client.from("item_photos").insert(photoRows);
+          if(insertError)throw insertError;
         }
+
       }catch(photoError){
         if(uploadedPaths.length){
           await client.storage.from(BUCKET).remove(uploadedPaths);
@@ -486,24 +559,36 @@ async function addItem(){
         await client.from("item_photos").delete().eq("item_id",data.id);
         await client.from("items").delete().eq("id",data.id);
 
-        throw new Error("Photo upload failed. The new product was rolled back. "+photoError.message);
+        throw new Error("Photo upload failed: "+photoError.message);
       }
 
       await loadCloudItems();
-      message("Product and "+files.length+" photo(s) saved to Supabase Cloud.");
-    }else{
-      localItems.push(item);
-      saveLocal();
+      message("Product saved with "+files.length+" cloud photo(s).");
 
-      message(currentUser
-        ?"Family product saved on this device for now."
-        :"Product saved on this device. Log in to transfer personal products to the cloud.");
+    }else{
+      localItems.push({
+        id:Date.now(),
+        name,
+        category:document.getElementById("category").value,
+        scope,
+        date,
+        quantity:Number(document.getElementById("quantity").value)||1,
+        consumed:false
+      });
+
+      saveLocal();
+      message("Family product saved on this device.");
     }
 
     document.getElementById("name").value="";
     document.getElementById("date").value="";
-    document.getElementById("photo").value="";
     document.getElementById("quantity").value="1";
+
+    document.querySelectorAll(".photoFile").forEach(input=>{
+      input.value="";
+    });
+
+    document.getElementById("photoPreview").innerHTML="";
 
     render();
 
@@ -537,7 +622,7 @@ async function consume(id,cloud){
 }
 
 async function deletePhoto(itemId,photoId,path){
-  if(!confirm("Delete this photo permanently from cloud storage?"))return;
+  if(!confirm("Delete this photo permanently?"))return;
 
   message("Deleting photo...");
 
@@ -546,7 +631,7 @@ async function deletePhoto(itemId,photoId,path){
     .remove([path]);
 
   if(storageError){
-    message("Could not delete photo from Storage: "+storageError.message,true);
+    message("Storage deletion failed: "+storageError.message,true);
     return;
   }
 
@@ -556,58 +641,49 @@ async function deletePhoto(itemId,photoId,path){
     .eq("item_id",itemId);
 
   if(rowError){
-    message("Photo file deleted, but its database record could not be deleted: "+rowError.message,true);
-    await loadCloudItems();
-    render();
+    message("Photo file deleted, but database record deletion failed: "+rowError.message,true);
     return;
   }
 
   await loadCloudItems();
   render();
-  message("Photo deleted from Supabase Cloud.");
+  message("Photo deleted.");
 }
 
 async function removeItem(id,cloud){
-  if(!confirm("Delete this item and all its photos?"))return;
+  if(!confirm("Delete this product and all its photos?"))return;
 
   if(cloud){
-    message("Checking product photos...");
-
     const {data:photos,error:photoError}=await client.from("item_photos")
-      .select("id,storage_path")
+      .select("storage_path")
       .eq("item_id",id);
 
     if(photoError){
-      message("Could not check product photos: "+photoError.message,true);
+      message("Could not check photos: "+photoError.message,true);
       return;
     }
 
     const paths=(photos||[]).map(x=>x.storage_path);
 
     if(paths.length){
-      const {error:storageError}=await client.storage
-        .from(BUCKET)
-        .remove(paths);
+      const {error}=await client.storage.from(BUCKET).remove(paths);
 
-      if(storageError){
-        message("Could not delete product photos. Product was not deleted: "+storageError.message,true);
+      if(error){
+        message("Could not delete photos: "+error.message,true);
         return;
       }
     }
 
-    const {error}=await client.from("items")
-      .delete()
-      .eq("id",id);
+    const {error}=await client.from("items").delete().eq("id",id);
 
     if(error){
-      message("Photos were deleted, but product deletion failed: "+error.message,true);
-      await loadCloudItems();
-      render();
+      message("Could not delete product: "+error.message,true);
       return;
     }
 
     await loadCloudItems();
-    message("Product and its cloud photos deleted.");
+    message("Product and photos deleted.");
+
   }else{
     localItems=localItems.filter(x=>x.id!==id);
     saveLocal();
@@ -633,13 +709,16 @@ function render(){
 
   const list=allItems.filter(x=>{
     const matches=x.name.toLowerCase().includes(search);
+
     const category=filter==="All"||
       (filter==="Consumed"?x.consumed:!x.consumed&&x.scope===filter);
+
     return matches&&category;
   });
 
   document.getElementById("items").innerHTML=list.map(x=>{
     const days=daysLeft(x.date);
+
     const status=x.consumed?"Consumed":
       days<0?`Expired ${Math.abs(days)} day(s) ago`:
       days===0?"Expires today":`${days} day(s) left`;
@@ -650,7 +729,10 @@ function render(){
     const photos=(x.photos||[]).map(photo=>`
       <div class="photoBox">
         <img src="${escapeText(photo.url)}" alt="Product photo">
-        <button class="dangerButton" onclick='deletePhoto(${id},${JSON.stringify(photo.id)},${JSON.stringify(photo.path)})'>Delete photo</button>
+        <button class="dangerButton"
+          onclick='deletePhoto(${id},${JSON.stringify(photo.id)},${JSON.stringify(photo.path)})'>
+          Delete photo
+        </button>
       </div>
     `).join("");
 
@@ -690,5 +772,6 @@ client.auth.onAuthStateChange((event,session)=>{
   }
 })();
 </script>
+
 </body>
 </html>
