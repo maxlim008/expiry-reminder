@@ -39,7 +39,7 @@ button:disabled{opacity:.5}
 .progressStatus.done{color:#247a59}
 #uploadProgress{margin-top:12px}
 
-/* NEW: Photo preview popup */
+/* Photo preview popup */
 .photoModal{
   display:none;
   position:fixed;
@@ -50,18 +50,13 @@ button:disabled{opacity:.5}
   justify-content:center;
   padding:20px;
 }
-
-.photoModal.show{
-  display:flex;
-}
-
+.photoModal.show{display:flex}
 .photoModal img{
   max-width:100%;
   max-height:85vh;
   object-fit:contain;
   border-radius:10px;
 }
-
 .photoModalClose{
   position:absolute;
   top:20px;
@@ -76,26 +71,43 @@ button:disabled{opacity:.5}
   margin:0;
   cursor:pointer;
 }
+
+/* Edit product form */
+.editPanel{
+  background:#f7faf7;
+  border:1px solid #dce8de;
+  border-radius:12px;
+  padding:12px;
+  margin-top:12px;
+}
+.editPanel h4{margin:4px 0 10px}
+.editPanel label{
+  display:block;
+  font-size:13px;
+  color:#66756b;
+  margin-top:8px;
+}
+.editButtons{
+  display:flex;
+  gap:8px;
+  margin-top:8px;
+}
+.editButtons button{flex:1}
 </style>
 </head>
 
 <body>
 
-<!-- NEW: Photo Preview Popup -->
-<div id="photoModal"
-     class="photoModal"
-     onclick="closePhoto()">
-
+<!-- Photo Preview Popup -->
+<div id="photoModal" class="photoModal" onclick="closePhoto()">
   <button class="photoModalClose"
           onclick="closePhoto();event.stopPropagation()">
     &times;
   </button>
-
   <img id="largePhoto"
        src=""
        alt="Product photo preview"
        onclick="event.stopPropagation()">
-
 </div>
 
 <header>
@@ -193,7 +205,6 @@ Maximum 8 MB per photo.
 </div>
 
 <div id="photoPreview" class="photoGrid"></div>
-
 <div id="uploadProgress"></div>
 
 <button id="addButton" onclick="addItem()">Add item</button>
@@ -221,6 +232,10 @@ let cloudItems = [];
 let localItems = JSON.parse(localStorage.getItem("expiryItems") || "[]");
 let localPhotos = JSON.parse(localStorage.getItem("expiryPhotoCache") || "{}");
 let saving = false;
+
+/* NEW: Track which product is being edited */
+let editingItemKey = null;
+let editingSaving = false;
 
 function message(text,error=false){
   const el=document.getElementById("message");
@@ -358,8 +373,6 @@ function updateProgress(index,percent,statusText,statusType=""){
 
   if(statusType==="failed"){
     fill.style.background="#b33";
-  }else if(statusType==="done"){
-    fill.style.background="#247a59";
   }else{
     fill.style.background="#247a59";
   }
@@ -525,6 +538,7 @@ async function signOut(){
 
   currentUser=null;
   cloudItems=[];
+  editingItemKey=null;
 
   document.getElementById("signedOut").classList.remove("hidden");
   document.getElementById("signedIn").classList.add("hidden");
@@ -635,7 +649,6 @@ async function loadCloudItems(){
 
     const photoMap={};
 
-    /* Generate signed URLs independently */
     const signedResults=await Promise.all(
       photoRows.map(async photo=>{
         try{
@@ -812,7 +825,7 @@ async function addItem(){
             entry.index
           );
 
-          const {data:photoData,error:photoRecordError}=await client
+          const {error:photoRecordError}=await client
             .from("item_photos")
             .insert(photoRow)
             .select("id,item_id,storage_path")
@@ -983,35 +996,140 @@ async function removeItem(id,cloud){
       return;
     }
 
+    if(editingItemKey==="cloud:"+id)editingItemKey=null;
+
     await loadCloudItems();
     message("Product and photos deleted.");
 
   }else{
     localItems=localItems.filter(x=>x.id!==id);
     saveLocal();
+
+    if(editingItemKey==="local:"+id)editingItemKey=null;
   }
 
   render();
 }
 
-/* NEW: Open photo preview */
+/* ===================================
+   NEW: EDIT PRODUCT FUNCTIONS
+=================================== */
+
+/* Open the editing form */
+function editItem(id,cloud){
+  editingItemKey=(cloud?"cloud:":"local:")+id;
+  render();
+}
+
+/* Cancel editing */
+function cancelEdit(){
+  editingItemKey=null;
+  render();
+}
+
+/* Save edited product details */
+async function saveEdit(id,cloud){
+  if(editingSaving)return;
+
+  const name=document.getElementById("editName").value.trim();
+  const category=document.getElementById("editCategory").value;
+  const date=document.getElementById("editDate").value;
+  const quantity=Number(document.getElementById("editQuantity").value);
+
+  if(!name){
+    alert("Please enter a product name.");
+    return;
+  }
+
+  if(!date){
+    alert("Please select an expiry date.");
+    return;
+  }
+
+  if(!Number.isFinite(quantity)||quantity<1){
+    alert("Quantity must be at least 1.");
+    return;
+  }
+
+  editingSaving=true;
+  message("Saving product changes...");
+
+  try{
+    if(cloud){
+      if(!currentUser)throw new Error("Please log in again.");
+
+      const {error}=await client.from("items")
+        .update({
+          name:name,
+          category:category,
+          expiry_date:date,
+          quantity:quantity
+        })
+        .eq("id",id)
+        .eq("personal_owner_id",currentUser.id);
+
+      if(error)throw error;
+
+      editingItemKey=null;
+
+      const refreshed=await loadCloudItems();
+
+      if(!refreshed){
+        message("Changes saved, but the product list could not refresh. Please refresh the page.",true);
+        return;
+      }
+
+      message("Product updated successfully!");
+
+    }else{
+      const item=localItems.find(x=>x.id===id);
+
+      if(!item)throw new Error("Product could not be found.");
+
+      item.name=name;
+      item.category=category;
+      item.date=date;
+      item.quantity=quantity;
+
+      saveLocal();
+
+      editingItemKey=null;
+      message("Family product updated successfully!");
+    }
+
+    render();
+
+  }catch(error){
+    message("Could not update product: "+error.message,true);
+
+  }finally{
+    editingSaving=false;
+  }
+}
+
+/* ===================================
+   PHOTO PREVIEW FUNCTIONS
+=================================== */
+
 function openPhoto(url){
   document.getElementById("largePhoto").src=url;
   document.getElementById("photoModal").classList.add("show");
 }
 
-/* NEW: Close photo preview */
 function closePhoto(){
   document.getElementById("photoModal").classList.remove("show");
   document.getElementById("largePhoto").src="";
 }
 
-/* NEW: Close preview with Escape key */
 document.addEventListener("keydown",function(event){
   if(event.key==="Escape"){
     closePhoto();
   }
 });
+
+/* ===================================
+   RENDER PRODUCT LIST
+=================================== */
 
 function render(){
   const search=document.getElementById("search").value.toLowerCase();
@@ -1047,7 +1165,9 @@ function render(){
     const id=JSON.stringify(x.id);
     const cloud=x.cloud?"true":"false";
 
-    /* NEW: Uploaded thumbnails are clickable */
+    const itemKey=(x.cloud?"cloud:":"local:")+x.id;
+    const isEditing=editingItemKey===itemKey;
+
     const photos=(x.photos||[]).map(photo=>`
       <div class="photoBox">
         <img
@@ -1063,14 +1183,81 @@ function render(){
       </div>
     `).join("");
 
+    /* Build the editing form */
+    const editForm=isEditing?`
+      <div class="editPanel">
+        <h4>Edit Product</h4>
+
+        <label>Product name</label>
+        <input
+          id="editName"
+          type="text"
+          value="${escapeText(x.name)}"
+          placeholder="Product name">
+
+        <label>Category</label>
+        <select id="editCategory">
+          ${["Food","Drinks","Medicine","Skincare","Household","Other"].map(c=>
+            `<option value="${c}" ${x.category===c?"selected":""}>${c}</option>`
+          ).join("")}
+        </select>
+
+        <label>Expiry date</label>
+        <input
+          id="editDate"
+          type="date"
+          value="${escapeText(x.date)}">
+
+        <label>Quantity</label>
+        <input
+          id="editQuantity"
+          type="number"
+          min="1"
+          step="1"
+          value="${escapeText(x.quantity)}">
+
+        <div class="editButtons">
+          <button onclick='saveEdit(${id},${cloud})'>
+            Save Changes
+          </button>
+
+          <button class="secondary" onclick="cancelEdit()">
+            Cancel
+          </button>
+        </div>
+      </div>
+    `:"";
+
     return `<div class="item">
       <b>${escapeText(x.name)}</b>
-      <div class="small">${escapeText(x.category)} · ${x.scope} · Qty: ${escapeText(x.quantity)}</div>
-      <div class="${!x.consumed&&days<0?"danger":""}">${status}</div>
+
+      <div class="small">
+        ${escapeText(x.category)} · ${x.scope} · Qty: ${escapeText(x.quantity)}
+      </div>
+
+      <div class="${!x.consumed&&days<0?"danger":""}">
+        ${status}
+      </div>
+
       <div class="small">Expiry: ${escapeText(x.date)}</div>
+
       ${photos?`<div class="photoGrid">${photos}</div>`:""}
-      ${!x.consumed?`<button class="secondary" onclick='consume(${id},${cloud})'>Mark consumed</button>`:""}
-      <button class="secondary" onclick='removeItem(${id},${cloud})'>Delete product</button>
+
+      <button class="secondary"
+        onclick='editItem(${id},${cloud})'>
+        ${isEditing?"Editing Product":"Edit Product"}
+      </button>
+
+      ${editForm}
+
+      ${!x.consumed?
+        `<button class="secondary" onclick='consume(${id},${cloud})'>Mark consumed</button>`:""
+      }
+
+      <button class="secondary"
+        onclick='removeItem(${id},${cloud})'>
+        Delete product
+      </button>
     </div>`;
   }).join("")||"<p class='small'>No items found. Add your first product below.</p>";
 }
@@ -1083,6 +1270,7 @@ client.auth.onAuthStateChange((event,session)=>{
   if(event==="SIGNED_OUT"){
     currentUser=null;
     cloudItems=[];
+    editingItemKey=null;
     render();
   }
 });
