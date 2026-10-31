@@ -30,6 +30,14 @@ button:disabled{opacity:.5}
 .photoBox img{width:100px;height:100px;object-fit:cover;border-radius:10px}
 .photoBox button{font-size:11px;padding:7px;margin:3px 0}
 .photoInput{background:#f7faf7;padding:8px;border-radius:10px;margin:8px 0}
+.progressCard{background:#f7faf7;border:1px solid #e2e9e3;border-radius:12px;padding:10px;margin:9px 0}
+.progressTop{display:flex;justify-content:space-between;gap:8px;font-size:13px;margin-bottom:8px}
+.progressTrack{height:9px;background:#e1e9e2;border-radius:20px;overflow:hidden}
+.progressFill{height:100%;width:0%;background:#247a59;border-radius:20px;transition:width .12s linear}
+.progressStatus{font-size:12px;color:#66756b;margin-top:6px}
+.progressStatus.failed{color:#b33}
+.progressStatus.done{color:#247a59}
+#uploadProgress{margin-top:12px}
 </style>
 </head>
 
@@ -99,7 +107,10 @@ button:disabled{opacity:.5}
 <input id="quantity" type="number" min="1" value="1" placeholder="Quantity">
 
 <h4>Product photos (up to 5)</h4>
-<p class="small">Choose one photo in each box. You can attach up to five photos to one product.</p>
+<p class="small">
+Choose up to five photos. Each photo uploads separately and has its own progress bar.
+Maximum 8 MB per photo.
+</p>
 
 <div class="photoInput">
 <label class="small">Photo 1</label>
@@ -128,12 +139,13 @@ button:disabled{opacity:.5}
 
 <div id="photoPreview" class="photoGrid"></div>
 
+<div id="uploadProgress"></div>
+
 <button id="addButton" onclick="addItem()">Add item</button>
 
 <p class="small">
 Personal product photos are uploaded to Supabase Cloud.
 Family products are stored on this device for now. Family cloud sharing is not yet available.
-Maximum 8 MB per photo.
 </p>
 </div>
 
@@ -142,6 +154,7 @@ const SUPABASE_URL = "https://ukmkpodtwberyqdekxhz.supabase.co";
 const SUPABASE_KEY = "sb_publishable_3YCS6PLbbmqL5hDyrH6eNA_aem80e6Q";
 const BUCKET = "product-photos";
 const MAX_PHOTO_SIZE = 8 * 1024 * 1024;
+const MAX_PHOTOS = 5;
 
 const client = window.supabase.createClient(
   SUPABASE_URL,
@@ -152,6 +165,7 @@ let currentUser = null;
 let cloudItems = [];
 let localItems = JSON.parse(localStorage.getItem("expiryItems") || "[]");
 let localPhotos = JSON.parse(localStorage.getItem("expiryPhotoCache") || "{}");
+let saving = false;
 
 function message(text,error=false){
   const el=document.getElementById("message");
@@ -182,29 +196,31 @@ function escapeText(s){
 
 function selectedFiles(){
   return Array.from(document.querySelectorAll(".photoFile"))
-    .map(input=>input.files[0])
-    .filter(Boolean);
+    .map((input,index)=>({
+      file:input.files[0],
+      index:index+1
+    }))
+    .filter(x=>x.file);
 }
 
 function previewPhotos(){
   const files=selectedFiles();
   const preview=document.getElementById("photoPreview");
-
   preview.innerHTML="";
 
-  files.forEach(file=>{
+  files.forEach(entry=>{
     const box=document.createElement("div");
     box.className="photoBox";
 
     const img=document.createElement("img");
     img.alt="Selected photo";
-    img.src=URL.createObjectURL(file);
-
-    img.onload=()=>URL.revokeObjectURL(img.src);
+    const objectUrl=URL.createObjectURL(entry.file);
+    img.src=objectUrl;
+    img.onload=()=>URL.revokeObjectURL(objectUrl);
 
     const label=document.createElement("div");
     label.className="small";
-    label.textContent=file.name;
+    label.textContent="Photo "+entry.index;
 
     box.appendChild(img);
     box.appendChild(label);
@@ -228,6 +244,169 @@ function photoExtension(file){
   return map[file.type]||"jpg";
 }
 
+function createProgressRows(files){
+  const container=document.getElementById("uploadProgress");
+  container.innerHTML="";
+
+  files.forEach(entry=>{
+    const card=document.createElement("div");
+    card.className="progressCard";
+    card.id="progressCard"+entry.index;
+
+    const top=document.createElement("div");
+    top.className="progressTop";
+
+    const name=document.createElement("span");
+    name.textContent="Photo "+entry.index+": "+entry.file.name;
+
+    const percent=document.createElement("strong");
+    percent.id="progressPercent"+entry.index;
+    percent.textContent="Waiting";
+
+    top.appendChild(name);
+    top.appendChild(percent);
+
+    const track=document.createElement("div");
+    track.className="progressTrack";
+
+    const fill=document.createElement("div");
+    fill.className="progressFill";
+    fill.id="progressFill"+entry.index;
+
+    track.appendChild(fill);
+
+    const status=document.createElement("div");
+    status.className="progressStatus";
+    status.id="progressStatus"+entry.index;
+    status.textContent="Waiting to upload";
+
+    card.appendChild(top);
+    card.appendChild(track);
+    card.appendChild(status);
+    container.appendChild(card);
+  });
+}
+
+function updateProgress(index,percent,statusText,statusType=""){
+  const fill=document.getElementById("progressFill"+index);
+  const percentText=document.getElementById("progressPercent"+index);
+  const status=document.getElementById("progressStatus"+index);
+
+  if(!fill||!percentText||!status)return;
+
+  fill.style.width=Math.max(0,Math.min(100,percent))+"%";
+  percentText.textContent=statusType==="done"?"Done":
+    statusType==="failed"?"Failed":Math.round(percent)+"%";
+
+  status.textContent=statusText;
+  status.className="progressStatus "+statusType;
+
+  if(statusType==="failed"){
+    fill.style.background="#b33";
+  }else if(statusType==="done"){
+    fill.style.background="#247a59";
+  }else{
+    fill.style.background="#247a59";
+  }
+}
+
+/*
+  Upload with XMLHttpRequest so the browser can report
+  actual bytes sent to Supabase.
+*/
+async function uploadPhotoWithProgress(file,itemId,index){
+  if(!currentUser)throw new Error("Please log in first.");
+
+  if(!file.type.startsWith("image/")){
+    throw new Error("Please select an image file.");
+  }
+
+  if(file.size>MAX_PHOTO_SIZE){
+    throw new Error("This photo is larger than 8 MB.");
+  }
+
+  const {data:sessionData,error:sessionError}=await client.auth.getSession();
+
+  if(sessionError)throw sessionError;
+
+  const token=sessionData.session?.access_token;
+
+  if(!token)throw new Error("Your login session has expired. Please log in again.");
+
+  const path=
+    currentUser.id+"/"+itemId+"/"+crypto.randomUUID()+"."+photoExtension(file);
+
+  const encodedPath=path.split("/").map(encodeURIComponent).join("/");
+  const uploadUrl=SUPABASE_URL+"/storage/v1/object/"+BUCKET+"/"+encodedPath;
+
+  updateProgress(index,0,"Starting upload...");
+
+  return new Promise((resolve,reject)=>{
+    const xhr=new XMLHttpRequest();
+
+    xhr.open("POST",uploadUrl,true);
+    xhr.setRequestHeader("apikey",SUPABASE_KEY);
+    xhr.setRequestHeader("Authorization","Bearer "+token);
+    xhr.setRequestHeader("Content-Type",file.type);
+    xhr.setRequestHeader("x-upsert","false");
+
+    xhr.upload.onprogress=function(event){
+      if(event.lengthComputable){
+        const percent=(event.loaded/event.total)*100;
+        updateProgress(
+          index,
+          percent,
+          "Uploading: "+formatBytes(event.loaded)+" of "+formatBytes(event.total)
+        );
+      }else{
+        updateProgress(index,0,"Uploading...");
+      }
+    };
+
+    xhr.onload=function(){
+      if(xhr.status>=200&&xhr.status<300){
+        updateProgress(index,100,"Upload complete. Saving photo record...","done");
+
+        resolve({
+          item_id:itemId,
+          user_id:currentUser.id,
+          storage_path:path
+        });
+      }else{
+        let errorMessage="Upload failed (HTTP "+xhr.status+").";
+
+        try{
+          const response=JSON.parse(xhr.responseText);
+          errorMessage=response.message||response.error||errorMessage;
+        }catch(e){}
+
+        reject(new Error(errorMessage));
+      }
+    };
+
+    xhr.onerror=function(){
+      reject(new Error("Network connection failed during photo upload. Please check your internet connection."));
+    };
+
+    xhr.ontimeout=function(){
+      reject(new Error("Photo upload timed out. Please try again."));
+    };
+
+    xhr.onabort=function(){
+      reject(new Error("Photo upload was cancelled."));
+    };
+
+    xhr.timeout=120000;
+    xhr.send(file);
+  });
+}
+
+function formatBytes(bytes){
+  if(bytes<1024)return bytes+" B";
+  if(bytes<1024*1024)return (bytes/1024).toFixed(0)+" KB";
+  return (bytes/(1024*1024)).toFixed(1)+" MB";
+}
+
 async function signUp(){
   const email=document.getElementById("email").value.trim();
   const password=document.getElementById("password").value;
@@ -239,22 +418,23 @@ async function signUp(){
 
   message("Creating your account...");
 
-  const {data,error}=await client.auth.signUp({
-    email,
-    password,
-    options:{emailRedirectTo:window.location.href}
-  });
+  try{
+    const {data,error}=await client.auth.signUp({
+      email,
+      password,
+      options:{emailRedirectTo:window.location.href}
+    });
 
-  if(error){
-    message(error.message,true);
-    return;
-  }
+    if(error)throw error;
 
-  if(data.session){
-    await handleUser(data.session.user);
-    message("Account created successfully!");
-  }else{
-    message("Account created. Please confirm your email before logging in.");
+    if(data.session){
+      await handleUser(data.session.user);
+      message("Account created successfully!");
+    }else{
+      message("Account created. Please confirm your email before logging in.");
+    }
+  }catch(error){
+    message("Account creation failed: "+error.message,true);
   }
 }
 
@@ -269,17 +449,18 @@ async function signIn(){
 
   message("Logging in...");
 
-  const {data,error}=await client.auth.signInWithPassword({
-    email,password
-  });
+  try{
+    const {data,error}=await client.auth.signInWithPassword({
+      email,password
+    });
 
-  if(error){
-    message(error.message,true);
-    return;
+    if(error)throw error;
+
+    await handleUser(data.user);
+    message("You are logged in.");
+  }catch(error){
+    message("Login failed: "+error.message,true);
   }
-
-  await handleUser(data.user);
-  message("You are logged in.");
 }
 
 async function signOut(){
@@ -309,12 +490,15 @@ async function handleUser(user){
 
   message("Loading your cloud products...");
 
-  await migrateLocalPersonalItems();
-  await loadCloudItems();
-  await migrateLegacyPhotos();
-  await loadCloudItems();
-
-  render();
+  try{
+    await migrateLocalPersonalItems();
+    await loadCloudItems();
+    await migrateLegacyPhotos();
+    await loadCloudItems();
+    render();
+  }catch(error){
+    message("Some cloud products could not be loaded: "+error.message,true);
+  }
 }
 
 async function migrateLocalPersonalItems(){
@@ -353,99 +537,103 @@ async function migrateLocalPersonalItems(){
   message("Your existing personal products have been transferred.");
 }
 
-async function uploadPhoto(file,itemId){
-  if(!currentUser)throw new Error("Please log in first.");
-
-  if(!file.type.startsWith("image/")){
-    throw new Error("Please select image files only.");
-  }
-
-  if(file.size>MAX_PHOTO_SIZE){
-    throw new Error("Each photo must be 8 MB or smaller.");
-  }
-
-  const path=currentUser.id+"/"+itemId+"/"+crypto.randomUUID()+"."+photoExtension(file);
-
-  const {error}=await client.storage.from(BUCKET).upload(
-    path,
-    file,
-    {
-      contentType:file.type,
-      upsert:false
-    }
-  );
-
-  if(error)throw error;
-
-  return {
-    item_id:itemId,
-    user_id:currentUser.id,
-    storage_path:path
-  };
-}
-
 async function loadCloudItems(){
-  if(!currentUser)return;
+  if(!currentUser)return false;
 
-  const {data,error}=await client.from("items")
-    .select("*")
-    .eq("personal_owner_id",currentUser.id)
-    .order("created_at",{ascending:false});
+  try{
+    const {data,error}=await client.from("items")
+      .select("*")
+      .eq("personal_owner_id",currentUser.id)
+      .order("created_at",{ascending:false});
 
-  if(error){
-    message("Could not load products: "+error.message,true);
-    return;
-  }
-
-  const rows=data||[];
-  const ids=rows.map(x=>x.id);
-  let photoRows=[];
-
-  if(ids.length){
-    const result=await client.from("item_photos")
-      .select("id,item_id,storage_path")
-      .in("item_id",ids);
-
-    if(result.error){
-      message("Photo database error: "+result.error.message,true);
-      return;
+    if(error){
+      message("Product list refresh failed: "+error.message,true);
+      return false;
     }
 
-    photoRows=result.data||[];
-  }
+    const rows=data||[];
+    const ids=rows.map(x=>x.id);
+    let photoRows=[];
 
-  const photoMap={};
+    if(ids.length){
+      const result=await client.from("item_photos")
+        .select("id,item_id,storage_path")
+        .in("item_id",ids);
 
-  for(const photo of photoRows){
-    const {data:signed,error:signedError}=await client.storage
-      .from(BUCKET)
-      .createSignedUrl(photo.storage_path,3600);
+      if(result.error){
+        cloudItems=rows.map(x=>({
+          id:x.id,
+          name:x.name,
+          category:x.category,
+          scope:"Personal",
+          date:x.expiry_date,
+          quantity:x.quantity,
+          consumed:x.status==="consumed",
+          photos:[],
+          cloud:true
+        }));
 
-    if(signedError){
-      console.error("Photo URL error:",signedError.message);
-      continue;
+        render();
+        message("Products loaded, but photo records could not be loaded: "+result.error.message,true);
+        return false;
+      }
+
+      photoRows=result.data||[];
     }
 
-    if(!photoMap[photo.item_id])photoMap[photo.item_id]=[];
+    const photoMap={};
 
-    photoMap[photo.item_id].push({
-      id:photo.id,
-      path:photo.storage_path,
-      url:signed.signedUrl
+    /*
+      Create signed URLs independently.
+      A failed photo URL must not prevent products from loading.
+    */
+    const signedResults=await Promise.all(
+      photoRows.map(async photo=>{
+        try{
+          const {data:signed,error:signedError}=await client.storage
+            .from(BUCKET)
+            .createSignedUrl(photo.storage_path,3600);
+
+          if(signedError)throw signedError;
+
+          return {
+            id:photo.id,
+            item_id:photo.item_id,
+            path:photo.storage_path,
+            url:signed.signedUrl
+          };
+        }catch(error){
+          console.warn("Photo preview could not load:",error.message);
+          return null;
+        }
+      })
+    );
+
+    signedResults.filter(Boolean).forEach(photo=>{
+      if(!photoMap[photo.item_id])photoMap[photo.item_id]=[];
+      photoMap[photo.item_id].push(photo);
     });
-  }
 
-  cloudItems=rows.map(x=>({
-    id:x.id,
-    name:x.name,
-    category:x.category,
-    scope:"Personal",
-    date:x.expiry_date,
-    quantity:x.quantity,
-    consumed:x.status==="consumed",
-    photos:photoMap[x.id]||[],
-    cloud:true
-  }));
+    cloudItems=rows.map(x=>({
+      id:x.id,
+      name:x.name,
+      category:x.category,
+      scope:"Personal",
+      date:x.expiry_date,
+      quantity:x.quantity,
+      consumed:x.status==="consumed",
+      photos:photoMap[x.id]||[],
+      cloud:true
+    }));
+
+    render();
+    return true;
+
+  }catch(error){
+    console.error("Cloud refresh error:",error);
+    message("Products were saved, but the list could not refresh: "+error.message,true);
+    return false;
+  }
 }
 
 async function migrateLegacyPhotos(){
@@ -466,7 +654,7 @@ async function migrateLegacyPhotos(){
         type:blob.type||"image/jpeg"
       });
 
-      const row=await uploadPhoto(file,itemId);
+      const row=await uploadPhotoWithProgress(file,itemId,1);
       path=row.storage_path;
 
       const {error}=await client.from("item_photos").insert(row);
@@ -486,6 +674,8 @@ async function migrateLegacyPhotos(){
 }
 
 async function addItem(){
+  if(saving)return;
+
   const button=document.getElementById("addButton");
   const name=document.getElementById("name").value.trim();
   const date=document.getElementById("date").value;
@@ -497,12 +687,17 @@ async function addItem(){
     return;
   }
 
-  if(files.some(f=>!f.type.startsWith("image/"))){
+  if(files.length>MAX_PHOTOS){
+    alert("You can add a maximum of five photos.");
+    return;
+  }
+
+  if(files.some(x=>!x.file.type.startsWith("image/"))){
     alert("Please select image files only.");
     return;
   }
 
-  if(files.some(f=>f.size>MAX_PHOTO_SIZE)){
+  if(files.some(x=>x.file.size>MAX_PHOTO_SIZE)){
     alert("Each photo must be 8 MB or smaller.");
     return;
   }
@@ -512,12 +707,19 @@ async function addItem(){
     return;
   }
 
+  saving=true;
   button.disabled=true;
   button.textContent="Saving...";
+  createProgressRows(files);
+
+  let productSaved=false;
+  let uploadedCount=0;
+  let failedCount=0;
+  let photoErrors=[];
 
   try{
     if(currentUser&&scope==="Personal"){
-      message("Saving product...");
+      message("Saving product details...");
 
       const {data,error}=await client.from("items").insert({
         created_by:currentUser.id,
@@ -532,38 +734,78 @@ async function addItem(){
         status:"active"
       }).select().single();
 
-      if(error)throw error;
+      if(error)throw new Error("Product details could not be saved: "+error.message);
 
-      const uploadedPaths=[];
-      const photoRows=[];
+      productSaved=true;
 
-      try{
-        for(const file of files){
-          message("Uploading photo "+(uploadedPaths.length+1)+" of "+files.length+"...");
+      /*
+        Add the product to the screen immediately.
+        Photo upload problems will not delete this product.
+      */
+      cloudItems.unshift({
+        id:data.id,
+        name:data.name,
+        category:data.category,
+        scope:"Personal",
+        date:data.expiry_date,
+        quantity:data.quantity,
+        consumed:false,
+        photos:[],
+        cloud:true
+      });
 
-          const row=await uploadPhoto(file,data.id);
-          uploadedPaths.push(row.storage_path);
-          photoRows.push(row);
+      render();
+      message("Product saved. Preparing photo uploads...");
+
+      for(const entry of files){
+        try{
+          updateProgress(entry.index,0,"Uploading to Supabase...");
+
+          const photoRow=await uploadPhotoWithProgress(
+            entry.file,
+            data.id,
+            entry.index
+          );
+
+          const {data:photoData,error:photoRecordError}=await client
+            .from("item_photos")
+            .insert(photoRow)
+            .select("id,item_id,storage_path")
+            .single();
+
+          if(photoRecordError){
+            await client.storage.from(BUCKET).remove([photoRow.storage_path]);
+            throw new Error("Photo uploaded, but its database record failed: "+photoRecordError.message);
+          }
+
+          uploadedCount++;
+          updateProgress(entry.index,100,"Photo uploaded successfully.","done");
+
+        }catch(photoError){
+          failedCount++;
+          photoErrors.push("Photo "+entry.index+": "+photoError.message);
+          updateProgress(entry.index,0,photoError.message,"failed");
+          console.error("Photo upload error:",photoError);
         }
-
-        if(photoRows.length){
-          const {error:insertError}=await client.from("item_photos").insert(photoRows);
-          if(insertError)throw insertError;
-        }
-
-      }catch(photoError){
-        if(uploadedPaths.length){
-          await client.storage.from(BUCKET).remove(uploadedPaths);
-        }
-
-        await client.from("item_photos").delete().eq("item_id",data.id);
-        await client.from("items").delete().eq("id",data.id);
-
-        throw new Error("Photo upload failed: "+photoError.message);
       }
 
-      await loadCloudItems();
-      message("Product saved with "+files.length+" cloud photo(s).");
+      /*
+        Refresh the list after all photo attempts.
+        Even if refresh fails, the saved product remains in the screen.
+      */
+      const refreshed=await loadCloudItems();
+
+      if(!refreshed){
+        message("Product saved. The list refresh failed; try refreshing the page. Your product was not deleted.",true);
+      }else if(failedCount>0){
+        message(
+          "Product saved successfully. "+uploadedCount+" photo(s) uploaded; "+failedCount+" photo(s) failed.\n"+
+          photoErrors.join("\n"),
+          true
+        );
+      }else{
+        message("Product saved successfully! "+uploadedCount+" photo(s) uploaded.");
+      }
 
     }else{
       localItems.push({
@@ -580,24 +822,46 @@ async function addItem(){
       message("Family product saved on this device.");
     }
 
-    document.getElementById("name").value="";
-    document.getElementById("date").value="";
-    document.getElementById("quantity").value="1";
-
-    document.querySelectorAll(".photoFile").forEach(input=>{
-      input.value="";
-    });
-
-    document.getElementById("photoPreview").innerHTML="";
+    /*
+      Clear form only after the product itself is saved.
+    */
+    if(productSaved||(!currentUser&&scope==="Family")){
+      clearProductForm();
+    }
 
     render();
 
   }catch(error){
-    message("Could not save product: "+error.message,true);
+    console.error("Product save error:",error);
+
+    if(productSaved){
+      message(
+        "Product details were saved, but another step failed: "+error.message+
+        "\nYour product has not been deleted. Please refresh the page.",
+        true
+      );
+    }else{
+      message("Could not save product: "+error.message,true);
+    }
+
   }finally{
+    saving=false;
     button.disabled=false;
     button.textContent="Add item";
   }
+}
+
+function clearProductForm(){
+  document.getElementById("name").value="";
+  document.getElementById("date").value="";
+  document.getElementById("quantity").value="1";
+
+  document.querySelectorAll(".photoFile").forEach(input=>{
+    input.value="";
+  });
+
+  document.getElementById("photoPreview").innerHTML="";
+  document.getElementById("uploadProgress").innerHTML="";
 }
 
 async function consume(id,cloud){
@@ -607,7 +871,7 @@ async function consume(id,cloud){
       .eq("id",id);
 
     if(error){
-      message(error.message,true);
+      message("Could not update product: "+error.message,true);
       return;
     }
 
