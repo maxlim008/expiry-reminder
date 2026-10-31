@@ -17,12 +17,16 @@ header p{margin:0;opacity:.9}
 input,select,button{width:100%;padding:12px;margin:6px 0;border:1px solid #d8e1d9;border-radius:10px;font-size:16px}
 button{background:#247a59;color:white;border:0;font-weight:bold}
 button.secondary{background:#e8f1eb;color:#247a59}
+button.dangerButton{background:#fbeaea;color:#b33}
 .item{border:1px solid #e2e9e3;padding:12px;border-radius:12px;margin-top:10px}
-.item img{width:65px;height:65px;object-fit:cover;border-radius:10px;float:right}
 .small{font-size:13px;color:#66756b}
 .danger{color:#b33}
-#message{font-size:14px;white-space:pre-wrap}
 .hidden{display:none}
+#message{font-size:14px;white-space:pre-wrap}
+.photoGrid{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.photoBox{width:90px}
+.photoBox img{width:90px;height:90px;object-fit:cover;border-radius:10px}
+.photoBox button{font-size:11px;padding:7px;margin:3px 0}
 </style>
 </head>
 <body>
@@ -78,18 +82,21 @@ button.secondary{background:#e8f1eb;color:#247a59}
 <label class="small">Expiry date</label>
 <input id="date" type="date">
 <input id="quantity" type="number" min="1" value="1" placeholder="Quantity">
-<input id="photo" type="file" accept="image/*">
-<button onclick="addItem()">Add item</button>
-<p class="small">Family products are stored on this device for now. Family cloud sharing will be added later.</p>
+<label class="small">Product photos (you can select multiple)</label>
+<input id="photo" type="file" accept="image/*" multiple>
+<p class="small">Maximum 8 MB per photo. Photos for Personal products are uploaded to Supabase Cloud. Family products are still stored on this device for now and do not support cloud photos.</p>
+<button id="addButton" onclick="addItem()">Add item</button>
 </div>
 
 <script>
 const SUPABASE_URL = "https://ukmkpodtwberyqdekxhz.supabase.co";
 const SUPABASE_KEY = "sb_publishable_3YCS6PLbbmqL5hDyrH6eNA_aem80e6Q";
+const BUCKET = "product-photos";
+const MAX_PHOTO_SIZE = 8 * 1024 * 1024;
 
 const client = window.supabase.createClient(
- SUPABASE_URL,
- SUPABASE_KEY
+  SUPABASE_URL,
+  SUPABASE_KEY
 );
 
 let currentUser = null;
@@ -98,367 +105,589 @@ let localItems = JSON.parse(localStorage.getItem("expiryItems") || "[]");
 let localPhotos = JSON.parse(localStorage.getItem("expiryPhotoCache") || "{}");
 
 function message(text,error=false){
- const el=document.getElementById("message");
- el.textContent=text;
- el.style.color=error?"#b33":"#247a59";
+  const el=document.getElementById("message");
+  el.textContent=text;
+  el.style.color=error?"#b33":"#247a59";
 }
 
 function saveLocal(){
- localStorage.setItem("expiryItems",JSON.stringify(localItems));
+  localStorage.setItem("expiryItems",JSON.stringify(localItems));
+}
+
+function saveLegacyPhotos(){
+  localStorage.setItem("expiryPhotoCache",JSON.stringify(localPhotos));
 }
 
 function daysLeft(date){
- const today=new Date();
- today.setHours(0,0,0,0);
- const expiry=new Date(date+"T00:00:00");
- return Math.ceil((expiry-today)/86400000);
-}
-
-async function signUp(){
- const email=document.getElementById("email").value.trim();
- const password=document.getElementById("password").value;
-
- if(!email||password.length<6){
-  message("Enter a valid email and a password with at least 6 characters.",true);
-  return;
- }
-
- message("Creating your account...");
-
- const {data,error}=await client.auth.signUp({
-  email,
-  password,
-  options:{
-   emailRedirectTo:window.location.href
-  }
- });
-
- if(error){
-  message(error.message,true);
-  return;
- }
-
- if(data.session){
-  await handleUser(data.session.user);
-  message("Account created successfully!");
- }else{
-  message("Account created. Please check your email and confirm your email address before logging in.");
- }
-}
-
-async function signIn(){
- const email=document.getElementById("email").value.trim();
- const password=document.getElementById("password").value;
-
- if(!email||!password){
-  message("Please enter your email and password.",true);
-  return;
- }
-
- message("Logging in...");
-
- const {data,error}=await client.auth.signInWithPassword({
-  email,password
- });
-
- if(error){
-  message(error.message,true);
-  return;
- }
-
- await handleUser(data.user);
- message("You are logged in.");
-}
-
-async function signOut(){
- const {error}=await client.auth.signOut();
-
- if(error){
-  message(error.message,true);
-  return;
- }
-
- currentUser=null;
- cloudItems=[];
- document.getElementById("signedOut").classList.remove("hidden");
- document.getElementById("signedIn").classList.add("hidden");
- message("Logged out.");
- render();
-}
-
-async function handleUser(user){
- currentUser=user;
-
- document.getElementById("signedOut").classList.add("hidden");
- document.getElementById("signedIn").classList.remove("hidden");
- document.getElementById("accountText").textContent="Logged in as "+user.email;
-
- message("Checking your saved products...");
-
- await migrateLocalPersonalItems();
- await loadCloudItems();
- render();
-}
-
-async function migrateLocalPersonalItems(){
- const marker="expiryMigrated_"+currentUser.id;
-
- if(localStorage.getItem(marker)==="yes")return;
-
- const personal=localItems.filter(x=>x.scope==="Personal");
-
- if(personal.length===0){
-  localStorage.setItem(marker,"yes");
-  return;
- }
-
- const rows=personal.map(x=>({
-  created_by:currentUser.id,
-  personal_owner_id:currentUser.id,
-  family_id:null,
-  name:x.name,
-  category:x.category||"Other",
-  quantity:Number(x.quantity)||1,
-  expiry_date:x.date,
-  photo_path:null,
-  notes:null,
-  status:x.consumed?"consumed":"active"
- }));
-
- const {error}=await client.from("items").insert(rows);
-
- if(error){
-  message("Existing products could not be transferred: "+error.message,true);
-  return;
- }
-
- localStorage.setItem(marker,"yes");
- message("Your existing personal products have been transferred.");
-}
-
-async function loadCloudItems(){
- const {data,error}=await client.from("items")
-  .select("*")
-  .eq("personal_owner_id",currentUser.id)
-  .order("created_at",{ascending:false});
-
- if(error){
-  message("Could not load cloud items: "+error.message,true);
-  return;
- }
-
- cloudItems=(data||[]).map(x=>({
-  id:x.id,
-  name:x.name,
-  category:x.category,
-  scope:"Personal",
-  date:x.expiry_date,
-  quantity:x.quantity,
-  consumed:x.status==="consumed",
-  photo:localPhotos[x.id]||"",
-  cloud:true
- }));
+  const today=new Date();
+  today.setHours(0,0,0,0);
+  const expiry=new Date(date+"T00:00:00");
+  return Math.ceil((expiry-today)/86400000);
 }
 
 function escapeText(s){
- return String(s).replace(/[&<>"']/g,c=>({
-  "&":"&amp;",
-  "<":"&lt;",
-  ">":"&gt;",
-  '"':"&quot;",
-  "'":"&#39;"
- }[c]));
+  return String(s??"").replace(/[&<>"']/g,c=>({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
+
+function photoExtension(file){
+  const type=(file.type||"").toLowerCase();
+  const map={
+    "image/jpeg":"jpg",
+    "image/png":"png",
+    "image/webp":"webp",
+    "image/gif":"gif",
+    "image/heic":"heic",
+    "image/heif":"heif"
+  };
+  return map[type]||"jpg";
+}
+
+async function signUp(){
+  const email=document.getElementById("email").value.trim();
+  const password=document.getElementById("password").value;
+
+  if(!email||password.length<6){
+    message("Enter a valid email and a password with at least 6 characters.",true);
+    return;
+  }
+
+  message("Creating your account...");
+
+  const {data,error}=await client.auth.signUp({
+    email,
+    password,
+    options:{emailRedirectTo:window.location.href}
+  });
+
+  if(error){
+    message(error.message,true);
+    return;
+  }
+
+  if(data.session){
+    await handleUser(data.session.user);
+    message("Account created successfully!");
+  }else{
+    message("Account created. Please confirm your email before logging in.");
+  }
+}
+
+async function signIn(){
+  const email=document.getElementById("email").value.trim();
+  const password=document.getElementById("password").value;
+
+  if(!email||!password){
+    message("Please enter your email and password.",true);
+    return;
+  }
+
+  message("Logging in...");
+
+  const {data,error}=await client.auth.signInWithPassword({
+    email,password
+  });
+
+  if(error){
+    message(error.message,true);
+    return;
+  }
+
+  await handleUser(data.user);
+  message("You are logged in.");
+}
+
+async function signOut(){
+  const {error}=await client.auth.signOut();
+
+  if(error){
+    message(error.message,true);
+    return;
+  }
+
+  currentUser=null;
+  cloudItems=[];
+  document.getElementById("signedOut").classList.remove("hidden");
+  document.getElementById("signedIn").classList.add("hidden");
+  message("Logged out.");
+  render();
+}
+
+async function handleUser(user){
+  currentUser=user;
+
+  document.getElementById("signedOut").classList.add("hidden");
+  document.getElementById("signedIn").classList.remove("hidden");
+  document.getElementById("accountText").textContent="Logged in as "+user.email;
+
+  message("Checking your saved products...");
+
+  await migrateLocalPersonalItems();
+  await loadCloudItems();
+  await migrateLegacyPhotos();
+  await loadCloudItems();
+
+  render();
+}
+
+async function migrateLocalPersonalItems(){
+  const marker="expiryMigrated_"+currentUser.id;
+
+  if(localStorage.getItem(marker)==="yes")return;
+
+  const personal=localItems.filter(x=>x.scope==="Personal");
+
+  if(personal.length===0){
+    localStorage.setItem(marker,"yes");
+    return;
+  }
+
+  const rows=personal.map(x=>({
+    created_by:currentUser.id,
+    personal_owner_id:currentUser.id,
+    family_id:null,
+    name:x.name,
+    category:x.category||"Other",
+    quantity:Number(x.quantity)||1,
+    expiry_date:x.date,
+    photo_path:null,
+    notes:null,
+    status:x.consumed?"consumed":"active"
+  }));
+
+  const {error}=await client.from("items").insert(rows);
+
+  if(error){
+    message("Existing products could not be transferred: "+error.message,true);
+    return;
+  }
+
+  localStorage.setItem(marker,"yes");
+  message("Your existing personal products have been transferred.");
+}
+
+async function loadCloudItems(){
+  if(!currentUser)return;
+
+  const {data,error}=await client.from("items")
+    .select("*")
+    .eq("personal_owner_id",currentUser.id)
+    .order("created_at",{ascending:false});
+
+  if(error){
+    message("Could not load cloud items: "+error.message,true);
+    return;
+  }
+
+  const rows=data||[];
+  const ids=rows.map(x=>x.id);
+  let photoRows=[];
+
+  if(ids.length){
+    const result=await client.from("item_photos")
+      .select("id,item_id,user_id,storage_path,created_at")
+      .in("item_id",ids);
+
+    if(result.error){
+      message("Could not load photo records: "+result.error.message,true);
+    }else{
+      photoRows=result.data||[];
+    }
+  }
+
+  const photoMap={};
+
+  for(const photo of photoRows){
+    if(!photoMap[photo.item_id])photoMap[photo.item_id]=[];
+
+    const {data:signed,error:signedError}=await client.storage
+      .from(BUCKET)
+      .createSignedUrl(photo.storage_path,3600);
+
+    if(signedError){
+      console.warn("Could not create photo URL:",signedError.message);
+      continue;
+    }
+
+    photoMap[photo.item_id].push({
+      id:photo.id,
+      path:photo.storage_path,
+      url:signed.signedUrl
+    });
+  }
+
+  cloudItems=rows.map(x=>({
+    id:x.id,
+    name:x.name,
+    category:x.category,
+    scope:"Personal",
+    date:x.expiry_date,
+    quantity:x.quantity,
+    consumed:x.status==="consumed",
+    photos:photoMap[x.id]||[],
+    cloud:true
+  }));
+}
+
+async function uploadPhotoFile(file,itemId){
+  if(!currentUser)throw new Error("Please log in first.");
+
+  if(!file.type.startsWith("image/")){
+    throw new Error("One of the selected files is not an image.");
+  }
+
+  if(file.size>MAX_PHOTO_SIZE){
+    throw new Error("Each photo must be 8 MB or smaller.");
+  }
+
+  const extension=photoExtension(file);
+  const path=currentUser.id+"/"+itemId+"/"+crypto.randomUUID()+"."+extension;
+
+  const {error:uploadError}=await client.storage
+    .from(BUCKET)
+    .upload(path,file,{
+      contentType:file.type,
+      upsert:false
+    });
+
+  if(uploadError)throw uploadError;
+
+  return {
+    item_id:itemId,
+    user_id:currentUser.id,
+    storage_path:path
+  };
+}
+
+async function migrateLegacyPhotos(){
+  if(!currentUser)return;
+
+  const oldPhotos=Object.entries(localPhotos);
+
+  if(!oldPhotos.length)return;
+
+  let migrated=0;
+
+  for(const [itemId,dataUrl] of oldPhotos){
+    const item=cloudItems.find(x=>x.id===itemId);
+
+    if(!item||!dataUrl||!dataUrl.startsWith("data:image/"))continue;
+    if(item.photos&&item.photos.length)continue;
+
+    let uploadedPath=null;
+
+    try{
+      const response=await fetch(dataUrl);
+      const blob=await response.blob();
+      const file=new File([blob],"old-photo.jpg",{type:blob.type||"image/jpeg"});
+
+      const row=await uploadPhotoFile(file,itemId);
+      uploadedPath=row.storage_path;
+
+      const {error}=await client.from("item_photos").insert(row);
+
+      if(error){
+        await client.storage.from(BUCKET).remove([uploadedPath]);
+        throw error;
+      }
+
+      delete localPhotos[itemId];
+      migrated++;
+    }catch(error){
+      console.warn("Legacy photo migration failed:",error.message);
+    }
+  }
+
+  if(migrated){
+    saveLegacyPhotos();
+    message(migrated+" old photo(s) transferred to Supabase Cloud.");
+  }
 }
 
 async function addItem(){
- const name=document.getElementById("name").value.trim();
- const date=document.getElementById("date").value;
- const scope=document.getElementById("scope").value;
- const file=document.getElementById("photo").files[0];
+  const button=document.getElementById("addButton");
+  const name=document.getElementById("name").value.trim();
+  const date=document.getElementById("date").value;
+  const scope=document.getElementById("scope").value;
+  const files=Array.from(document.getElementById("photo").files||[]);
 
- if(!name||!date){
-  alert("Please enter a product name and expiry date.");
-  return;
- }
-
- let photo="";
-
- if(file){
-  photo=await new Promise(resolve=>{
-   const reader=new FileReader();
-   reader.onload=()=>resolve(reader.result);
-   reader.readAsDataURL(file);
-  });
- }
-
- const item={
-  id:Date.now(),
-  name,
-  category:document.getElementById("category").value,
-  scope,
-  date,
-  quantity:Number(document.getElementById("quantity").value)||1,
-  photo,
-  consumed:false
- };
-
- if(currentUser&&scope==="Personal"){
-  message("Saving product to Supabase...");
-
-  const {data,error}=await client.from("items").insert({
-   created_by:currentUser.id,
-   personal_owner_id:currentUser.id,
-   family_id:null,
-   name:item.name,
-   category:item.category,
-   quantity:item.quantity,
-   expiry_date:item.date,
-   photo_path:null,
-   notes:null,
-   status:"active"
-  }).select().single();
-
-  if(error){
-   message("Could not save product: "+error.message,true);
-   return;
+  if(!name||!date){
+    alert("Please enter a product name and expiry date.");
+    return;
   }
 
-  if(photo){
-   localPhotos[data.id]=photo;
-   localStorage.setItem("expiryPhotoCache",JSON.stringify(localPhotos));
+  if(files.some(file=>!file.type.startsWith("image/"))){
+    alert("Please select image files only.");
+    return;
   }
 
-  await loadCloudItems();
-  message("Product saved to your cloud account.");
+  if(files.some(file=>file.size>MAX_PHOTO_SIZE)){
+    alert("Each photo must be 8 MB or smaller.");
+    return;
+  }
 
- }else{
-  localItems.push(item);
-  saveLocal();
+  if(files.length && (!currentUser||scope!=="Personal")){
+    alert("Cloud photo uploads are currently available only for logged-in Personal products. Please choose Personal and log in.");
+    return;
+  }
 
-  message(currentUser
-   ?"Family product saved on this device for now."
-   :"Product saved on this device. Log in to transfer personal products to the cloud.");
- }
+  const item={
+    id:Date.now(),
+    name,
+    category:document.getElementById("category").value,
+    scope,
+    date,
+    quantity:Number(document.getElementById("quantity").value)||1,
+    consumed:false
+  };
 
- document.getElementById("name").value="";
- document.getElementById("date").value="";
- document.getElementById("photo").value="";
+  button.disabled=true;
+  button.textContent="Saving...";
 
- render();
+  try{
+    if(currentUser&&scope==="Personal"){
+      message("Saving product to Supabase...");
+
+      const {data,error}=await client.from("items").insert({
+        created_by:currentUser.id,
+        personal_owner_id:currentUser.id,
+        family_id:null,
+        name:item.name,
+        category:item.category,
+        quantity:item.quantity,
+        expiry_date:item.date,
+        photo_path:null,
+        notes:null,
+        status:"active"
+      }).select().single();
+
+      if(error)throw error;
+
+      const uploadedPaths=[];
+      let photoRows=[];
+
+      try{
+        for(const file of files){
+          const row=await uploadPhotoFile(file,data.id);
+          uploadedPaths.push(row.storage_path);
+          photoRows.push(row);
+        }
+
+        if(photoRows.length){
+          const {error:photoError}=await client.from("item_photos").insert(photoRows);
+          if(photoError)throw photoError;
+        }
+      }catch(photoError){
+        if(uploadedPaths.length){
+          await client.storage.from(BUCKET).remove(uploadedPaths);
+        }
+
+        await client.from("item_photos").delete().eq("item_id",data.id);
+        await client.from("items").delete().eq("id",data.id);
+
+        throw new Error("Photo upload failed. The new product was rolled back. "+photoError.message);
+      }
+
+      await loadCloudItems();
+      message("Product and "+files.length+" photo(s) saved to Supabase Cloud.");
+    }else{
+      localItems.push(item);
+      saveLocal();
+
+      message(currentUser
+        ?"Family product saved on this device for now."
+        :"Product saved on this device. Log in to transfer personal products to the cloud.");
+    }
+
+    document.getElementById("name").value="";
+    document.getElementById("date").value="";
+    document.getElementById("photo").value="";
+    document.getElementById("quantity").value="1";
+
+    render();
+
+  }catch(error){
+    message("Could not save product: "+error.message,true);
+  }finally{
+    button.disabled=false;
+    button.textContent="Add item";
+  }
 }
 
 async function consume(id,cloud){
- if(cloud){
-  const {error}=await client.from("items")
-   .update({status:"consumed"})
-   .eq("id",id);
+  if(cloud){
+    const {error}=await client.from("items")
+      .update({status:"consumed"})
+      .eq("id",id);
 
-  if(error){
-   message(error.message,true);
-   return;
+    if(error){
+      message(error.message,true);
+      return;
+    }
+
+    await loadCloudItems();
+  }else{
+    const item=localItems.find(x=>x.id===id);
+    if(item)item.consumed=true;
+    saveLocal();
+  }
+
+  render();
+}
+
+async function deletePhoto(itemId,photoId,path){
+  if(!confirm("Delete this photo permanently from cloud storage?"))return;
+
+  message("Deleting photo...");
+
+  const {error:storageError}=await client.storage
+    .from(BUCKET)
+    .remove([path]);
+
+  if(storageError){
+    message("Could not delete photo from Storage: "+storageError.message,true);
+    return;
+  }
+
+  const {error:rowError}=await client.from("item_photos")
+    .delete()
+    .eq("id",photoId)
+    .eq("item_id",itemId);
+
+  if(rowError){
+    message("Photo file deleted, but its database record could not be deleted: "+rowError.message,true);
+    await loadCloudItems();
+    render();
+    return;
   }
 
   await loadCloudItems();
- }else{
-  const item=localItems.find(x=>x.id===id);
-  if(item)item.consumed=true;
-  saveLocal();
- }
-
- render();
+  render();
+  message("Photo deleted from Supabase Cloud.");
 }
 
 async function removeItem(id,cloud){
- if(!confirm("Delete this item?"))return;
+  if(!confirm("Delete this item and all its photos?"))return;
 
- if(cloud){
-  const {error}=await client.from("items")
-   .delete()
-   .eq("id",id);
+  if(cloud){
+    message("Checking product photos...");
 
-  if(error){
-   message(error.message,true);
-   return;
+    const {data:photos,error:photoError}=await client.from("item_photos")
+      .select("id,storage_path")
+      .eq("item_id",id);
+
+    if(photoError){
+      message("Could not check product photos: "+photoError.message,true);
+      return;
+    }
+
+    const paths=(photos||[]).map(x=>x.storage_path);
+
+    if(paths.length){
+      const {error:storageError}=await client.storage
+        .from(BUCKET)
+        .remove(paths);
+
+      if(storageError){
+        message("Could not delete product photos. Product was not deleted: "+storageError.message,true);
+        return;
+      }
+    }
+
+    const {error}=await client.from("items")
+      .delete()
+      .eq("id",id);
+
+    if(error){
+      message("Photos were deleted, but product deletion failed: "+error.message,true);
+      await loadCloudItems();
+      render();
+      return;
+    }
+
+    await loadCloudItems();
+    message("Product and its cloud photos deleted.");
+  }else{
+    localItems=localItems.filter(x=>x.id!==id);
+    saveLocal();
   }
 
-  await loadCloudItems();
- }else{
-  localItems=localItems.filter(x=>x.id!==id);
-  saveLocal();
- }
-
- render();
+  render();
 }
 
 function render(){
- const search=document.getElementById("search").value.toLowerCase();
- const filter=document.getElementById("filter").value;
+  const search=document.getElementById("search").value.toLowerCase();
+  const filter=document.getElementById("filter").value;
 
- let allItems=currentUser
-  ?[...cloudItems,...localItems.filter(x=>x.scope==="Family")]
-  :localItems;
+  const allItems=currentUser
+    ?[...cloudItems,...localItems.filter(x=>x.scope==="Family")]
+    :localItems;
 
- const active=allItems.filter(x=>!x.consumed);
- const soon=active.filter(x=>daysLeft(x.date)>=0&&daysLeft(x.date)<=7).length;
- const expired=active.filter(x=>daysLeft(x.date)<0).length;
+  const active=allItems.filter(x=>!x.consumed);
+  const soon=active.filter(x=>daysLeft(x.date)>=0&&daysLeft(x.date)<=7).length;
+  const expired=active.filter(x=>daysLeft(x.date)<0).length;
 
- document.getElementById("stats").textContent=
-  `Active: ${active.length} · Expiring within 7 days: ${soon} · Expired: ${expired}`;
+  document.getElementById("stats").textContent=
+    `Active: ${active.length} · Expiring within 7 days: ${soon} · Expired: ${expired}`;
 
- const list=allItems.filter(x=>{
-  const matches=x.name.toLowerCase().includes(search);
+  const list=allItems.filter(x=>{
+    const matches=x.name.toLowerCase().includes(search);
+    const category=filter==="All"||
+      (filter==="Consumed"?x.consumed:!x.consumed&&x.scope===filter);
+    return matches&&category;
+  });
 
-  const category=filter==="All"||
-   (filter==="Consumed"?x.consumed:!x.consumed&&x.scope===filter);
+  document.getElementById("items").innerHTML=list.map(x=>{
+    const days=daysLeft(x.date);
+    const status=x.consumed?"Consumed":
+      days<0?`Expired ${Math.abs(days)} day(s) ago`:
+      days===0?"Expires today":`${days} day(s) left`;
 
-  return matches&&category;
- });
+    const id=JSON.stringify(x.id);
+    const cloud=x.cloud?"true":"false";
 
- document.getElementById("items").innerHTML=list.map(x=>{
-  const days=daysLeft(x.date);
+    const photos=(x.photos||[]).map(photo=>`
+      <div class="photoBox">
+        <img src="${escapeText(photo.url)}" alt="Product photo">
+        <button class="dangerButton" onclick='deletePhoto(${id},${JSON.stringify(photo.id)},${JSON.stringify(photo.path)})'>Delete photo</button>
+      </div>
+    `).join("");
 
-  const status=x.consumed?"Consumed":
-   days<0?`Expired ${Math.abs(days)} day(s) ago`:
-   days===0?"Expires today":`${days} day(s) left`;
-
-  const id=JSON.stringify(x.id);
-  const cloud=x.cloud?"true":"false";
-
-  return `<div class="item">
-   ${x.photo?`<img src="${x.photo}" alt="Product photo">`:""}
-   <b>${escapeText(x.name)}</b>
-   <div class="small">${escapeText(x.category)} · ${x.scope} · Qty: ${x.quantity}</div>
-   <div class="${!x.consumed&&days<0?"danger":""}">${status}</div>
-   <div class="small">Expiry: ${x.date}</div>
-   ${!x.consumed?`<button class="secondary" onclick='consume(${id},${cloud})'>Mark consumed</button>`:""}
-   <button class="secondary" onclick='removeItem(${id},${cloud})'>Delete</button>
-   <div style="clear:both"></div>
-  </div>`;
- }).join("")||"<p class='small'>No items found. Add your first product below.</p>";
+    return `<div class="item">
+      <b>${escapeText(x.name)}</b>
+      <div class="small">${escapeText(x.category)} · ${x.scope} · Qty: ${escapeText(x.quantity)}</div>
+      <div class="${!x.consumed&&days<0?"danger":""}">${status}</div>
+      <div class="small">Expiry: ${escapeText(x.date)}</div>
+      ${photos?`<div class="photoGrid">${photos}</div>`:""}
+      ${!x.consumed?`<button class="secondary" onclick='consume(${id},${cloud})'>Mark consumed</button>`:""}
+      <button class="secondary" onclick='removeItem(${id},${cloud})'>Delete product</button>
+    </div>`;
+  }).join("")||"<p class='small'>No items found. Add your first product below.</p>";
 }
 
 client.auth.onAuthStateChange((event,session)=>{
- if(event==="SIGNED_IN"&&session?.user&&!currentUser){
-  handleUser(session.user);
- }
+  if(event==="SIGNED_IN"&&session?.user&&!currentUser){
+    handleUser(session.user);
+  }
 
- if(event==="SIGNED_OUT"){
-  currentUser=null;
-  cloudItems=[];
-  render();
- }
+  if(event==="SIGNED_OUT"){
+    currentUser=null;
+    cloudItems=[];
+    render();
+  }
 });
 
 (async function start(){
- const {data,error}=await client.auth.getSession();
+  const {data,error}=await client.auth.getSession();
 
- if(error)message(error.message,true);
+  if(error)message(error.message,true);
 
- if(data.session){
-  await handleUser(data.session.user);
- }else{
-  render();
- }
+  if(data.session){
+    await handleUser(data.session.user);
+  }else{
+    render();
+  }
 })();
 </script>
 </body>
